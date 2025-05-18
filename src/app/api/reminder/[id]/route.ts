@@ -1,181 +1,187 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getAnnouncementOrOfferById } from "@/db/announcement-offer";
-import { getAppointmentById } from "@/db/appointment";
-import { getReminderById } from "@/db/reminder";
-import { ReminderSchema } from "@/features/reminder/schemas/schema";
-import { prisma } from "@/lib/prisma";
-import { ZodError } from "zod";
-import { syncNewReminderOffset } from "@/lib/appointment";
+import { NextRequest, NextResponse } from "next/server"
+import { getAnnouncementOrOfferById } from "@/db/announcement-offer"
+import { getAppointmentById } from "@/db/appointment"
+import { getReminderById } from "@/db/reminder"
+import { ReminderSchema } from "@/features/reminder/schemas/schema"
+import { prisma } from "@/lib/prisma"
+import { ZodError } from "zod"
 
 interface ParamsProps {
-  params: Promise<{ id: string }>;
+  params: Promise<{ id: string }>
 }
 
 export async function GET(req: NextRequest, { params }: ParamsProps) {
   try {
-    const { id } = await params;
-    const reminder = await getReminderById(id);
+    const { id } = await params
+    const announcement = await getReminderById(id)
 
-    if (!reminder) {
+    if (!announcement) {
       return NextResponse.json(
-        { message: "Reminder with id not found!", success: false },
+        { error: "Reminder with id not found" },
         { status: 404 }
-      );
+      )
     }
-    return NextResponse.json(
-      {
-        data: reminder,
-        success: true,
-        message: "Reminder fetched successfully!",
-      },
-      { status: 200 }
-    );
+    return NextResponse.json(announcement, { status: 200 })
   } catch (error) {
     return NextResponse.json(
-      { message: "Failed to fetch reminder!", success: false, error: error },
+      { error: "Failed to fetch reminder" },
       { status: 500 }
-    );
+    )
   }
 }
 
+// Update an existing reminder
 export async function PUT(req: NextRequest, { params }: ParamsProps) {
   try {
-    const { id } = await params;
+    const { id } = await params
     if (!id) {
       return NextResponse.json(
-        { message: "Reminder Id required!", success: false },
+        { error: "Reminder Id required!" },
         { status: 400 }
-      );
+      )
     }
 
-    const body = await req.json();
-    const parsedData = ReminderSchema.parse(body);
+    const body = await req.json()
+    const parsedData = ReminderSchema.parse(body)
 
-    const existingReminder = await getReminderById(id);
+    const existingReminder = await getReminderById(id)
 
     if (!existingReminder) {
-      return NextResponse.json(
-        { message: "Reminder not found!", success: false },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Reminder not found" }, { status: 404 })
     }
 
-    const existingOffsets = await prisma.reminderOffset.findMany({
-      where: { reminderId: id },
-      select: { id: true },
-    });
-    const offsetIds = existingOffsets.map((offset) => offset.id);
-
-    // Delete related AppointmentReminderOffsets
-    await prisma.appointmentReminderOffset.deleteMany({
+    const deletedReminder = await prisma.reminder.delete({
       where: {
-        reminderOffsetId: { in: offsetIds },
+        id,
       },
-    });
+    })
 
-    //  Delete existing nested records
-    await prisma.notification.deleteMany({ where: { reminderId: id } });
-    await prisma.reminderOffset.deleteMany({ where: { reminderId: id } });
+    if (deletedReminder) {
+      const newReminder = await prisma.reminder.create({
+        data: {
+          id,
+          type: parsedData.type,
+          title: parsedData.title,
+          description: parsedData.description,
+          message: parsedData.message,
+          services: {
+            connect: parsedData.services.map((service) => ({ id: service })), // Connect existing services
+          },
+          notifications: {
+            create: parsedData.notifications.map((notification) => ({
+              method: notification.method,
+            })),
+          },
+          reminderOffset: {
+            create: parsedData.reminderOffset.map((reminderOffset) => ({
+              customScheduleAt: reminderOffset.scheduledAt,
+              sendOffset: reminderOffset.sendOffset
+                ? reminderOffset.sendOffset
+                : null,
+              // scheduledAt: new Date(reminderOffset.scheduledAt),
+              sendBefore: reminderOffset.sendBefore,
+            })),
+          },
+        },
+        include: {
+          services: true,
+          notifications: true,
+          reminderOffset: true,
+        },
+      })
 
-    // Update reminder and recreate nested records
-    const updatedReminder = await prisma.reminder.update({
-      where: { id },
-      data: {
-        type: parsedData.type,
-        title: parsedData.title,
-        description: parsedData.description,
-        message: parsedData.message,
-        services: {
-          set: [], // clear existing
-          connect: parsedData.services.map((serviceId) => ({ id: serviceId })),
-        },
-        notifications: {
-          create: parsedData.notifications.map((notification) => ({
-            method: notification.method,
-          })),
-        },
-        reminderOffset: {
-          create: parsedData.reminderOffset.map((offset) => ({
-            sendOffset: offset.sendOffset,
-            sendBefore: offset.sendBefore,
-          })),
-        },
-      },
-      include: {
-        services: true,
-        notifications: true,
-        reminderOffset: true,
-      },
-    });
-
-    for (const offset of updatedReminder.reminderOffset) {
-      await syncNewReminderOffset(offset.id);
+      return NextResponse.json({ status: 200, sucess: true, data: newReminder })
     }
 
-    return NextResponse.json(
-      {
-        reminder: updatedReminder,
-        success: true,
-        message: "Reminder updated successfully!",
-      },
-      { status: 200 }
-    );
+    // const updatedReminder = await prisma.reminder.update({
+    //   where: { id },
+    //   data: {
+    //     type: parsedData.type,
+    //     title: parsedData.title,
+    //     description: parsedData.description,
+    //     message: parsedData.message,
+    //     services: {
+    //       connect: parsedData.services.map((service) => ({ id: service })), // Connect existing services
+    //     },
+    //     notifications: {
+    //       upsert: parsedData.notifications.map((notification) => ({
+    //         where: { id: notification.id }, // If ID exists, update, otherwise create
+    //         update: { method: notification.method },
+    //         create: { method: notification.method },
+    //       })),
+    //     },
+    //     reminderOffset: {
+    //       upsert: parsedData.reminderOffset.map((reminderOffset) => ({
+    //         where: { id: reminderOffset.id }, // If ID exists, update, otherwise create
+    //         update: {
+    //           sendOffset: reminderOffset.sendOffset,
+    //           scheduledAt: reminderOffset.scheduledAt,
+    //           sendBefore: reminderOffset.sendBefore,
+    //         },
+    //         create: {
+    //           sendOffset: reminderOffset.sendOffset,
+    //           scheduledAt: new Date(reminderOffset.scheduledAt),
+    //           sendBefore: reminderOffset.sendBefore,
+    //         },
+    //       })),
+    //     },
+    //   },
+    //   include: {
+    //     services: true,
+    //     notifications: true,
+    //     reminderOffset: true,
+    //   },
+    // })
+
+    return NextResponse.json({
+      message: "Something went wrong while updating reminder",
+      status: 500,
+      success: false,
+    })
   } catch (error) {
     if (error instanceof ZodError) {
       return NextResponse.json(
-        {
-          message: "Validation failed!",
-          error: error.errors[0].message,
-          success: false,
-        },
+        { error: "Validation failed", details: error },
         { status: 400 }
-      );
+      )
     }
-
     return NextResponse.json(
-      { message: "Failed to update reminder!", success: false, error: error },
+      { error: "Internal server error" },
       { status: 500 }
-    );
+    )
   }
 }
 
 // Delete a reminder
 export async function DELETE(req: NextRequest, { params }: ParamsProps) {
   try {
-    const { id } = await params;
+    const { id } = await params
 
     if (!id) {
       return NextResponse.json(
-        { message: "Reminder Id required!", success: false },
+        { error: "Reminder Id required!" },
         { status: 400 }
-      );
+      )
     }
 
-    const existingReminder = await getReminderById(id);
+    const existingReminder = await getReminderById(id)
 
     if (!existingReminder) {
-      return NextResponse.json(
-        { message: "Reminder not found!", success: false },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Reminder not found" }, { status: 404 })
     }
 
     const deletedReminder = await prisma.reminder.delete({
       where: { id },
-    });
+    })
 
     return NextResponse.json(
-      {
-        data: deletedReminder,
-        success: true,
-        message: "Reminder deleted successfully!",
-      },
+      { message: "Reminder deleted successfully", reminder: deletedReminder },
       { status: 200 }
-    );
+    )
   } catch (error) {
     return NextResponse.json(
-      { message: "Failed to delete reminder!", success: false, error: error },
+      { error: "Failed to delete reminder" },
       { status: 500 }
-    );
+    )
   }
 }
