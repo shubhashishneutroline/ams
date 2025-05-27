@@ -1,4 +1,4 @@
-"use client"
+/* "use client"
 import Breadcrumbs from "@/components/shared/bread-crumb"
 import Heading from "@/components/admin/heading"
 import { CalendarDays } from "lucide-react"
@@ -27,3 +27,4 @@ const ReminderPage = () => {
 }
 
 export default ReminderPage
+ */
