@@ -1,9 +1,14 @@
 // src/features/service/schemas/schema.ts
 import { z } from "zod";
-import { Status, WeekDays } from "../_types/service";
+import { Status, WeekDays,ServiceType } from "../_types/service";
 
 export const serviceSchema = z.object({
   id: z.string().optional(),
+ /*  type: z.enum([ServiceType.PHYSICAL, ServiceType.VIRTUAL], {
+    required_error: "Type is required",
+    invalid_type_error: "Type must be PHYSICAL or VIRTUAL",
+  }), */
+  type: z.enum([ServiceType.PHYSICAL, ServiceType.VIRTUAL]).optional(),
   title: z.string().min(3, "Title must be at least 3 characters long"),
   description: z
     .string()

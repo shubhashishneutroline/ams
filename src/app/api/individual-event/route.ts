@@ -1,20 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import {
-  eventSchema,
-  meetingSchema,
-} from "@/features/individual-event/schemas/schema";
+import { shareableLinkSchema, shareableLinkWithServiceSchema } from "@/features/individual-event/schemas/schema";
 import { ZodError } from "zod";
-import { EventType, VideoProvider } from "@/features/individual-event/types/types";
-import { Event } from "@/features/individual-event/types/types";
-import { refreshZoomToken } from "@/lib/zoom";
-import { refreshGoogleToken } from "@/lib/google-meet";
-import { refreshWebexToken } from "@/lib/webex";
-
+import { EventType } from "@/features/individual-event/types/types";
+import { VideoProvider } from "@prisma/client";
+import { ShareableLink } from "@/features/individual-event/types/types";
+import { checkVideoIntegrationAuth } from "@/lib/checkVideoIntegration";
+import { Individual } from "@/features/individual/types/types";
+import { ServiceType } from "@/app/(admin)/service/_types/service";
 
 export async function POST(req: NextRequest) {
   try {
-    const userId = "cmb8pvkt80000vdz0z6yfg58p"; // Get from your auth system (Clerk)
+    const userId = "cmben86we0000vd8gk890533p"; // Get from your auth system (Clerk)
     if (!userId) {
       return NextResponse.json(
         { message: "Unauthorized!", success: false },
@@ -46,7 +43,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
 
     // Validate the body using the Zod schema
-    const parsedData = eventSchema.parse(body);
+    const parsedData = shareableLinkWithServiceSchema.parse(body);
 
     // Convert location to VideoProvider enum value
     const provider = parsedData.location?.toUpperCase() as VideoProvider;
@@ -59,128 +56,67 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Check if the individual has the required video integration
-    const videoIntegration = individual.videoIntegrations.find(
-      (integration) => integration.provider === provider
-    );
-
-    let needsAuth = false;
-    let oauthUrl = "";
-
-    if (provider === "ZOOM" && videoIntegration) {
-      console.log("hello")
-      // Check if token is expired
-      if (
-        videoIntegration.expiresAt &&
-        videoIntegration.expiresAt < new Date()
-      ) {
-        if (videoIntegration.refreshToken) {
-          try {
-            // Attempt to refresh the token
-            const newAccessToken = await refreshZoomToken(videoIntegration);
-              return NextResponse.json({  accessToken: newAccessToken.accessToken
-            ,  expiresAt: newAccessToken.expiresAt} );
-           
-          } catch (err) {
-            // If Zoom rejects the refresh (token expired/invalid), handle it here:
-            needsAuth = true;
-            oauthUrl = `https://zoom.us/oauth/authorize?response_type=code&client_id=${process.env.ZOOM_CLIENT_ID}&redirect_uri=http://localhost:3000/api/zoom/callback&state=${individualId}`;
-          }
-        } else {
-          // No refresh token, require re-authentication
-          needsAuth = true;
-          oauthUrl = `https://zoom.us/oauth/authorize?response_type=code&client_id=${process.env.ZOOM_CLIENT_ID}&redirect_uri=http://localhost:3000/api/zoom/callback&state=${individualId}`;
-        }
-      }
-    }
-
-     // ---- GOOGLE MEET ----
-  if (provider === "GOOGLE_MEET" && videoIntegration) {
-    console.log("helloss")
-    if (
-      videoIntegration.expiresAt &&
-      videoIntegration.expiresAt < new Date()
-    ) {
-      if (videoIntegration.refreshToken) {
-        try {
-          const newAccessToken = await refreshGoogleToken(videoIntegration);
-          videoIntegration.accessToken = newAccessToken.accessToken;
-          videoIntegration.expiresAt = newAccessToken.expiresAt;
-        } catch (err) {
-          console.log('test')
-          needsAuth = true;
-          oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_MEET_CLIENT_ID}&redirect_uri=${encodeURIComponent(`${process.env.ORIGIN}/api/google/callback`)}&response_type=code&scope=${encodeURIComponent("https://www.googleapis.com/auth/calendar")}&access_type=offline&prompt=consent&state=${individualId}`;
-        }
-      } else {
-        needsAuth = true;
-        oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_MEET_CLIENT_ID}&redirect_uri=${encodeURIComponent(`${process.env.ORIGIN}/api/google/callback`)}&response_type=code&scope=${encodeURIComponent("https://www.googleapis.com/auth/calendar")}&access_type=offline&prompt=consent&state=${individualId}`;
-      }
-    }
-  }
-  
-  //--WEBEX--
-if (provider === "WEBEX" && videoIntegration) {
-  if (
-    videoIntegration.expiresAt &&
-    videoIntegration.expiresAt < new Date()
-  ) {
-    if (videoIntegration.refreshToken) {
-      try {
-        const newAccessToken = await refreshWebexToken(videoIntegration);
-        videoIntegration.accessToken = newAccessToken.accessToken;
-        videoIntegration.expiresAt = newAccessToken.expiresAt;
-      } catch (err) {
-        needsAuth = true;
-        oauthUrl = `https://webexapis.com/v1/authorize?client_id=${process.env.WEBEX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(`${process.env.ORIGIN}/api/webex/callback`)}&scope=${encodeURIComponent("spark:kms meeting:schedules_read meeting:participants_read meeting:participants_write meeting:schedules_write")}&state=${individualId}`;
-      }
-    } else {
-      needsAuth = true;
-      oauthUrl = `https://webexapis.com/v1/authorize?client_id=${process.env.WEBEX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(`${process.env.ORIGIN}/api/webex/callback`)}&scope=${encodeURIComponent("spark:kms meeting:schedules_read meeting:participants_read meeting:participants_write meeting:schedules_write")}&state=${individualId}`;
-    }
-  }
-}
-
+    const { needsAuth } = await checkVideoIntegrationAuth({
+      individual,
+      provider,
+    });
 
     if (needsAuth) {
       return NextResponse.json(
         {
-          message: "Authentication required!",
-          authUrl: oauthUrl,
-          needsAuth: true,
           success: false,
+          message: `Auth expired.Please go to Integrations and reconnect your ${provider} account.`,
         },
-        { status: 200 }
+        { status: 401 }
       );
     }
 
-     if (parsedData.type = EventType.ONE_TO_ONE) {
-    //generate link as of booking meeting
-     }
-     
-    // Create the event type with nested availability creation
-    const event/* : Event  */= await prisma.event.create({
+   
+   // 1. Create the Service (virtual event)
+    const createdService = await prisma.service.create({
       data: {
-        title: parsedData.title,
-        description: parsedData.description,
-        location: parsedData.location,
-        timezone: parsedData.timezone,
-        slug: parsedData.slug,
-        userId: parsedData.userId,
-        individualId: individualId,
-        type: parsedData.type,
-        availability: {
-          create: parsedData.availability?.map((availability) => ({
-            dayOfWeek: availability.dayOfWeek,
-            startTime: availability.startTime,
-            endTime: availability.endTime,
-            duration: availability.duration,
+        title: parsedData.service.title,
+        type: ServiceType.VIRTUAL, // hardcoded for virtual event
+        description: parsedData.service.description || "",
+        estimatedDuration: parsedData.service.estimatedDuration || 60,
+        status: parsedData.service.status || "ACTIVE", 
+        serviceAvailability: {
+          create: (parsedData.service.serviceAvailability ?? [] ).map((avail) => ({
+            weekDay: avail.weekDay,
+            timeSlots: {
+              create: (avail.timeSlots ?? []).map((slot) => ({
+                startTime: slot.startTime,
+                endTime: slot.endTime,
+              })),
+            },
           })),
         },
-      },
-      include: {
-        availability: true, 
+         individualId: individualId,
       },
     });
+
+    // 2. Create the ShareableLink, linking to the new service
+    const createdLink = await prisma.shareableLink.create({
+      data: {
+        location: parsedData.location,
+        slug: parsedData.slug,
+        type: parsedData.type,
+        serviceId: createdService.id,
+        linkType: parsedData.linkType,
+        metaTitle: parsedData.metaTitle,
+        metaDescription: parsedData.metaDescription,
+        date: parsedData.date ? new Date(parsedData.date) : undefined,
+        dateRangeEnd: parsedData.dateRangeEnd ? new Date(parsedData.dateRangeEnd) : undefined,
+        expiresAt: parsedData.expiresAt ? new Date(parsedData.expiresAt) : undefined,
+        // Add other fields as needed
+      },
+    });
+
+
+
+ if ((parsedData.type = EventType.ONE_TO_ONE)) {
+      //generate link as of booking meeting
+    }
 
     return NextResponse.json(
       { message: "Event created successfully!", data: event, success: true },
@@ -200,13 +136,15 @@ if (provider === "WEBEX" && videoIntegration) {
   }
 }
 
-
 //get request
 export async function GET(req: NextRequest) {
   // Replace with your auth system
-  const userId = "cmb8pvkt80000vdz0z6yfg58p";
+  const userId = "cmben86we0000vd8gk890533p";
   if (!userId) {
-    return NextResponse.json({ message: "Unauthorized", success: false }, { status: 401 });
+    return NextResponse.json(
+      { message: "Unauthorized", success: false },
+      { status: 401 }
+    );
   }
 
   try {
@@ -217,6 +155,9 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json({ data: events, success: true });
   } catch (error) {
-    return NextResponse.json({ message: "Failed to fetch events", error, success: false }, { status: 500 });
+    return NextResponse.json(
+      { message: "Failed to fetch events", error, success: false },
+      { status: 500 }
+    );
   }
 }
